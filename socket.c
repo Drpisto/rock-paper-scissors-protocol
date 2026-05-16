@@ -14,6 +14,13 @@ int rpsp_socket_open(void) {
         return -1;
     }
 
+    int opt = 1;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_HDRINCL, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt IP_HDRINCL");
+        close(sockfd);
+        return -1;
+    }
+
     return sockfd;
 }
 

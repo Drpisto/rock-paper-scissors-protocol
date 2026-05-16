@@ -44,9 +44,7 @@ rpsp_move_t get_move_user(){
 
 }
 
-char get_tautn() {
-    char taunt[256];
+void get_taunt(char *buf, size_t len) {
     printf("Enter your taunt: ");
-    scanf(" %255[^\n]", taunt);
-    return taunt; // Return the first character of the taunt for simplicity
+    scanf(" %255[^\n]", buf);
 }
