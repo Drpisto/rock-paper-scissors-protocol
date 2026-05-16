@@ -8,96 +8,51 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define BUF_SIZE 65535
+#define BUF 65535
 
-/* from socket.c */
-int     rpsp_socket_open  (void);
-void    rpsp_socket_close (int sockfd);
-ssize_t rpsp_recv         (int sockfd, uint8_t *buffer,
-                           size_t buffer_len, char *src_ip,
-                           size_t src_ip_len);
+int rpsp_socket_open(void);
+void rpsp_socket_close(int fd);
+ssize_t rpsp_recv(int fd, uint8_t *buf, size_t n, char *ip, size_t iplen);
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage:\n"
-                        "  %s server\n"
-                        "  %s client <ip>\n", argv[0], argv[0]);
+        fprintf(stderr, "usage: %s server | client <ip>\n", argv[0]);
         return 1;
     }
 
-    /* ── role ── */
     rpsp_role_t role;
-    const char *dest_ip = NULL;
+    const char *dest = NULL;
 
-    if (strcmp(argv[1], "server") == 0) {
-        role = ROLE_SERVER;
-        printf("[main] SERVER mode\n");
+    if (!strcmp(argv[1], "server")) role = ROLE_SERVER;
+    else if (argc == 3 && !strcmp(argv[1], "client")) { role = ROLE_CLIENT; dest = argv[2]; }
+    else { fprintf(stderr, "need: server or client <ip>\n"); return 1; }
 
-    } else if (strcmp(argv[1], "client") == 0 && argc == 3) {
-        role    = ROLE_CLIENT;
-        dest_ip = argv[2];
-        printf("[main] CLIENT mode → %s\n", dest_ip);
+    int fd = rpsp_socket_open();
+    if (fd < 0) return 1;
 
-    } else {
-        fprintf(stderr, "error: client needs <ip>\n");
-        return 1;
-    }
+    struct timeval tv = {5, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* ── socket ── */
-    int sockfd = rpsp_socket_open();
-    if (sockfd < 0) return 1;
+    rpsp_session_t s;
+    rpsp_session_init(&s, role);
 
-    /* ── timeout 5s ── */
-    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (role == ROLE_CLIENT) rpsp_client_start(&s, fd, dest);
 
-    /* ── session ── */
-    rpsp_session_t session;
-    rpsp_session_init(&session, role);
+    uint8_t buf[BUF];
+    char ip[INET_ADDRSTRLEN];
 
-    /* ── client starts with HELLO ── */
-    if (role == ROLE_CLIENT)
-        rpsp_client_start(&session, sockfd, dest_ip);
-
-    /* ── event loop ── */
-    uint8_t buf[BUF_SIZE];
-    char    src_ip[INET_ADDRSTRLEN];
-
-    while (session.state != STATE_DONE &&
-           session.state != STATE_DEADLOCK) {
-
-        memset(buf, 0, sizeof(buf));
-
-        ssize_t len = rpsp_recv(sockfd, buf, sizeof(buf),
-                                src_ip, sizeof(src_ip));
-
-        /* timeout → DEADLOCK */
-        if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            printf("[main] timeout → DEADLOCK\n");
-            session.state = STATE_DEADLOCK;
+    while (!s.done) {
+        ssize_t n = rpsp_recv(fd, buf, sizeof(buf), ip, sizeof(ip));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) { printf("[main] timeout\n"); break; }
             break;
         }
-
-        /* not our packet → skip */
-        if (len == 0) continue;
-
-        if (len < 0) break;
-
-        /* skip IP header */
-        int ip_hlen = (buf[0] & 0x0F) * 4;
-
-        rpsp_handle_packet(&session, sockfd,
-                           buf + ip_hlen,
-                           (size_t)(len - ip_hlen),
-                           src_ip);
+        if (n == 0) continue;
+        int hlen = (buf[0] & 0x0F) * 4;
+        rpsp_handle_packet(&s, fd, buf + hlen, (size_t)(n - hlen), ip);
     }
 
-    /* ── done ── */
-    if (session.state == STATE_DEADLOCK)
-        printf("[main] ended: DEADLOCK\n");
-    else
-        printf("[main] ended: OK\n");
-
-    rpsp_socket_close(sockfd);
+    rpsp_socket_close(fd);
+    printf("[main] done\n");
     return 0;
 }

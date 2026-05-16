@@ -33,20 +33,20 @@ rps_header create_rps_header(uint8_t type, uint8_t move_round,
     return header;
 }
 
-ip_header create_ip_header(uint8_t version, uint8_t header_length,
+ip_header create_ip_header( uint8_t header_length,
                            uint8_t service_type, uint16_t total_length,
                            uint16_t identification, uint16_t flags_and_offset,
-                           uint8_t time_to_live, uint8_t protocol,
+                            uint8_t protocol,
                            uint16_t header_checksum, uint32_t source_ip,
                            uint32_t destination_ip) {
     ip_header header;
-    header.version = version;
+    header.version = 4;
     header.header_length = header_length;
     header.service_type = service_type;
     header.total_length = htons(total_length);
     header.identification = htons(identification);
     header.flags_and_offset = htons(flags_and_offset);
-    header.time_to_live = time_to_live;
+    header.time_to_live = 32;
     header.protocol = protocol;
     header.header_checksum = header_checksum;
     header.source_ip = htonl(source_ip);
