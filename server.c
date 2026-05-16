@@ -10,6 +10,7 @@
 
 int rpsp_server(void)
 {
+    srand((unsigned)time(NULL));
     int sockfd = rpsp_socket_open();
     if (sockfd < 0) return -1;
 
@@ -29,6 +30,7 @@ int rpsp_server(void)
             printf("Received HELLO from %s\n", src_ip);
             char accept;
             printf("Accept? (y/n): ");
+            fflush(stdout);
             scanf(" %c", &accept);
             if (accept == 'y' || accept == 'Y') {
                 rps_header r = create_rps_header(RPSP_ACCEPT, 0, rpsp->session_id, 0);
@@ -40,7 +42,7 @@ int rpsp_server(void)
         }
         if (rpsp->type == RPSP_MOVE) {
             printf("Received MOVE from %s\n", src_ip);
-            rpsp_move_t my_move = get_move_user();
+            rpsp_move_t my_move = (rpsp_move_t)((rand() % 3) + 1);
             rpsp_move_t opponent_move = (rpsp->move_round >> 6) & 0x03;
             rpsp_result_t game_result = det_result(my_move, opponent_move);
             rps_header r = create_rps_header(RPSP_RESULT, (my_move << 6) | (rpsp->move_round & 0x3F), rpsp->session_id, 0);
@@ -49,6 +51,8 @@ int rpsp_server(void)
         }
         if (rpsp->type == RPSP_TAUNT) {
             printf("Opponent taunted: %.*s\n", (int)(result - ip->ihl*4 - sizeof(rps_header)), rpsp->payload);
+            rps_header r = create_rps_header(RPSP_ACK, 0, rpsp->session_id, 0);
+            rpsp_send(sockfd, (uint8_t*)&r, sizeof(r), src_ip);
         }
         if (rpsp->type == RPSP_DATA) {
             printf("Opponent sent data: %.*s\n", (int)(result - ip->ihl*4 - sizeof(rps_header)), rpsp->payload);
