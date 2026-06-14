@@ -11,99 +11,165 @@
 #include <time.h>
 #include <arpa/inet.h>
 
-void send_hello(int, int, const char*);
-void send_move(int, int, const char*, rpsp_move_t);
-void send_taunt(int, int, const char*);
-void send_data(int, int, const char*);
+void send_hello(int sockfd, int session_id, const char *dest_ip) {
+    rps_header rps_header_r = create_rps_header(RPSP_HELLO, 0, session_id, 0);
+    rps_header_r.checksum = calculate_checksum_rps(&rps_header_r, NULL, 0);
+    rpsp_send(sockfd, (uint8_t*)&rps_header_r, sizeof(rps_header), dest_ip);
+}
 
-int rpsp_client(const char *dest_ip_str)
-{
+
+int rpsp_client(const char *dest_ip_str) {
     int sockfd = rpsp_socket_open();
     if (sockfd < 0) return -1;
 
     int session_id = rand() % 65536;
-    rpsp_move_t last_move = MOVE_NONE;
-    struct timeval tv = {10, 0};
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    uint8_t buffer[65536];
-    char src_ip[INET_ADDRSTRLEN];
-
-    while (1) {
-        printf("Welcome to Rock-Paper-Scissors Protocol Client!\n");
-        printf("1. send hello\n");
-        printf("2. send move\n");
-        printf("3. send taunt\n");
-        printf("4. send data\n");
-        printf("5. exit\n");
-
-        int choice;
-        printf("Enter your choice: ");
-        scanf("%d", &choice);
-        int ch;
-        while ((ch = getchar()) != '\n' && ch != EOF);
-
-        if (choice == 5) break;
-
-        if (choice == 1) {
-            send_hello(sockfd, session_id, dest_ip_str);
-        } else if (choice == 2) {
-            last_move = get_move_user();
-            send_move(sockfd, session_id, dest_ip_str, last_move);
-        } else if (choice == 3) {
-            send_taunt(sockfd, session_id, dest_ip_str);
-        } else if (choice == 4) {
-            send_data(sockfd, session_id, dest_ip_str);
-        } else {
-            printf("Invalid choice.\n");
-            continue;
-        }
-
-        printf("Waiting for server response...\n");
-        
-        usleep(100000);
-        
-        ssize_t result;
-        while (1) {
-            result = rpsp_recv(sockfd, buffer, sizeof(buffer), src_ip, sizeof(src_ip));
-            if (result <= 0) break;
-            struct iphdr *ip = (struct iphdr *)buffer;
-            rps_header *rpsp = (rps_header *)(buffer + (ip->ihl * 4));
-            if (rpsp->type != RPSP_HELLO && rpsp->type != RPSP_MOVE && rpsp->type != RPSP_DATA && rpsp->type != RPSP_TAUNT) break;
-        }
-        
-        if (result > 0) {
-            struct iphdr *ip = (struct iphdr *)buffer;
-            rps_header *rpsp = (rps_header *)(buffer + (ip->ihl * 4));
-            
-            if (rpsp->type == RPSP_ACCEPT) {
-                printf("Server accepted connection!\n");
-            } else if (rpsp->type == RPSP_REJECT) {
-                printf("Your connection was rejected by the server.\n");
-            } else if (rpsp->type == RPSP_RESULT) {
-                rpsp_move_t opponent_move = (rpsp->move_round >> 6) & 0x03;
-                rpsp_result_t game_result = det_result(last_move, opponent_move);
-                printf("You %s!\n", game_result == RESULT_WIN ? "win you can send data" : game_result == RESULT_LOSE ? "lose try again" : "draw");
-                last_move = MOVE_NONE;
-            } else if (rpsp->type == RPSP_FIN) {
-                printf("Your connection was closed by the server.\n");
-            } else if (rpsp->type == RPSP_RST) {
-                printf("Your connection was reset by the server.\n");
-            } else if (rpsp->type == RPSP_ACK) {
-                printf("Server acknowledged your data.\n");
-            } else if (rpsp->type == RPSP_DATA) {
-                printf("Server sent data: %.*s\n", (int)(result - ip->ihl*4 - sizeof(rps_header)), rpsp->payload);
-            }
-        } else {
-            printf("No response received\n");
-        }
-        printf("\n");
+    printf("[Client] Opened socket. Session ID: %d\n", session_id);
+    
+    // --- Step 1: Handshake ---
+    printf("[Client] Sending HELLO...\n");
+    rpsp_socket_flush(sockfd);
+    send_hello(sockfd, session_id, dest_ip_str);
+    
+    rps_header resp_hdr;
+    int status = rpsp_wait_packet(sockfd, session_id, RPSP_ACCEPT, &resp_hdr, NULL, NULL, 15);
+    if (status == RPSP_REJECT) {
+        printf("[Client] Connection rejected by server.\n");
+        close(sockfd);
+        return -1;
+    } else if (status < 0) {
+        printf("[Client] Handshake timed out or failed (status: %d).\n", status);
+        close(sockfd);
+        return -1;
     }
-
+    printf("[Client] Connection accepted!\n");
+    
+    // --- Step 2: Play Rock Paper Scissors ---
+    int round = 1;
+    int won_game = 0;
+    
+    while (round <= RPSP_DEADLOCK_THRESHOLD) {
+        printf("\n--- Round %d ---\n", round);
+        rpsp_move_t my_move = get_move_user();
+        
+        uint8_t move_round = RPSP_SET_MOVE_ROUND(my_move, round);
+        rps_header r_send = create_rps_header(RPSP_MOVE, move_round, session_id, 0);
+        r_send.checksum = calculate_checksum_rps(&r_send, NULL, 0);
+        
+        rpsp_socket_flush(sockfd);
+        rpsp_send(sockfd, (uint8_t*)&r_send, sizeof(rps_header), dest_ip_str);
+        
+        printf("[Client] Sent move. Waiting for server move and result...\n");
+        rps_header res_hdr;
+        status = rpsp_wait_packet(sockfd, session_id, RPSP_RESULT, &res_hdr, NULL, NULL, 20);
+        if (status == RPSP_DEADLOCK) {
+            printf("[Client] Connection deadlocked by server.\n");
+            close(sockfd);
+            return -1;
+        } else if (status < 0) {
+            printf("[Client] Timed out waiting for round result.\n");
+            close(sockfd);
+            return -1;
+        }
+        
+        rpsp_move_t server_move = RPSP_GET_MOVE(res_hdr.move_round);
+        printf("[Client] Server chose: %s\n", 
+               server_move == MOVE_ROCK ? "Rock" : 
+               server_move == MOVE_PAPER ? "Paper" : 
+               server_move == MOVE_SCISSORS ? "Scissors" : "None");
+        
+        rpsp_result_t res = det_result(my_move, server_move);
+        if (res == RESULT_WIN) {
+            printf("[Client] You WIN! You have the right to send data.\n");
+            won_game = 1;
+            break;
+        } else if (res == RESULT_LOSE) {
+            printf("[Client] You LOSE! You must wait for the server to send data.\n");
+            won_game = 0;
+            break;
+        } else {
+            printf("[Client] Draw! Playing next round.\n");
+            round++;
+        }
+    }
+    
+    if (round > RPSP_DEADLOCK_THRESHOLD) {
+        printf("[Client] Deadlock reached. Connection closed.\n");
+        close(sockfd);
+        return -1;
+    }
+    
+    // --- Step 3: Send or Receive Data ---
+    if (won_game) {
+        printf("\n--- Choose transmission type ---\n");
+        printf("1. Send Data\n");
+        printf("2. Send Taunt\n");
+        int choice = 1;
+        printf("Choice: ");
+        if (scanf("%d", &choice) != 1) choice = 1;
+        
+        char msg[256];
+        printf("Enter message: ");
+        scanf(" %255[^\n]", msg);
+        
+        rpsp_type_t type = (choice == 2) ? RPSP_TAUNT : RPSP_DATA;
+        size_t len = strlen(msg);
+        size_t total = sizeof(rps_header) + len;
+        uint8_t *pkt = malloc(total);
+        rps_header *h = (rps_header*)pkt;
+        *h = create_rps_header(type, 0, session_id, 0);
+        memcpy(pkt + sizeof(rps_header), msg, len);
+        h->checksum = calculate_checksum_rps(h, (uint8_t*)msg, len);
+        
+        rpsp_socket_flush(sockfd);
+        rpsp_send(sockfd, pkt, total, dest_ip_str);
+        free(pkt);
+        
+        printf("[Client] Message sent. Waiting for ACK...\n");
+        status = rpsp_wait_packet(sockfd, session_id, RPSP_ACK, NULL, NULL, NULL, 10);
+        if (status == 0) {
+            printf("[Client] Message acknowledged by server successfully!\n");
+        } else {
+            printf("[Client] Failed to receive ACK (status: %d).\n", status);
+        }
+    } else {
+        printf("\n[Client] Waiting for server data...\n");
+        rps_header data_hdr;
+        uint8_t payload[4096];
+        size_t payload_len = 0;
+        status = rpsp_wait_packet(sockfd, session_id, RPSP_DATA, &data_hdr, payload, &payload_len, 30);
+        if (status == 0) {
+            printf("[Client] Received DATA from server: %.*s\n", (int)payload_len, payload);
+            
+            // Send ACK
+            rps_header ack_hdr = create_rps_header(RPSP_ACK, 0, session_id, 0);
+            ack_hdr.checksum = calculate_checksum_rps(&ack_hdr, NULL, 0);
+            rpsp_send(sockfd, (uint8_t*)&ack_hdr, sizeof(ack_hdr), dest_ip_str);
+            printf("[Client] Sent ACK to server.\n");
+        } else if (rpsp_wait_packet(sockfd, session_id, RPSP_TAUNT, &data_hdr, payload, &payload_len, 1) == 0) {
+            printf("[Client] Received TAUNT from server: %.*s\n", (int)payload_len, payload);
+            
+            // Send ACK
+            rps_header ack_hdr = create_rps_header(RPSP_ACK, 0, session_id, 0);
+            ack_hdr.checksum = calculate_checksum_rps(&ack_hdr, NULL, 0);
+            rpsp_send(sockfd, (uint8_t*)&ack_hdr, sizeof(ack_hdr), dest_ip_str);
+            printf("[Client] Sent ACK to server.\n");
+        } else {
+            printf("[Client] Timed out or failed waiting for server data.\n");
+        }
+    }
+    
+    // --- Step 4: Finish connection ---
+    rps_header fin_hdr = create_rps_header(RPSP_FIN, 0, session_id, 0);
+    fin_hdr.checksum = calculate_checksum_rps(&fin_hdr, NULL, 0);
+    rpsp_send(sockfd, (uint8_t*)&fin_hdr, sizeof(fin_hdr), dest_ip_str);
+    
     close(sockfd);
+    printf("[Client] Connection closed.\n");
     return 0;
 }
 
 int main(int argc, char **argv) {
+    srand((unsigned)time(NULL));
     if (argc < 2) {
         fprintf(stderr, "usage: %s <server_ip>\n", argv[0]);
         return 1;
@@ -111,40 +177,3 @@ int main(int argc, char **argv) {
     return rpsp_client(argv[1]);
 }
 
-void send_hello(int sockfd, int session_id, const char *dest_ip) {
-    rps_header rps_header_r = create_rps_header(RPSP_HELLO, 0, session_id, 0);
-    rpsp_send(sockfd, (uint8_t*)&rps_header_r, sizeof(rps_header), dest_ip);
-}
-
-void send_move(int sockfd, int session_id, const char *dest_ip, rpsp_move_t my_move) {
-    my_move = (my_move << 6) & 0xC0;
-    rps_header rps_header_r = create_rps_header(RPSP_MOVE, my_move, session_id, 0);
-    rpsp_send(sockfd, (uint8_t*)&rps_header_r, sizeof(rps_header), dest_ip);
-}
-
-void send_data(int sockfd, int session_id, const char *dest_ip) {
-    char data[256];
-    printf("Enter your data: ");
-    scanf(" %255[^\n]", data);
-    size_t len = strlen(data);
-    size_t total = sizeof(rps_header) + len;
-    uint8_t *pkt = malloc(total);
-    rps_header *h = (rps_header*)pkt;
-    *h = create_rps_header(RPSP_DATA, 0, session_id, 0);
-    memcpy(pkt + sizeof(rps_header), data, len);
-    rpsp_send(sockfd, pkt, total, dest_ip);
-    free(pkt);
-}
-void send_taunt(int sockfd, int session_id, const char *dest_ip) {
-    char taunt[256];
-    printf("Enter your taunt: ");
-    scanf(" %255[^\n]", taunt);
-    size_t len = strlen(taunt);
-    size_t total = sizeof(rps_header) + len;
-    uint8_t *pkt = malloc(total);
-    rps_header *h = (rps_header*)pkt;
-    *h = create_rps_header(RPSP_TAUNT, 0, session_id, 0);
-    memcpy(pkt + sizeof(rps_header), taunt, len);
-    rpsp_send(sockfd, pkt, total, dest_ip);
-    free(pkt);
-}

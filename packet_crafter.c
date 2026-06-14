@@ -58,15 +58,39 @@ uint16_t calculate_checksum_rps(const rps_header *rps,
                             const uint8_t payload[],
                             size_t payload_len) {
     uint32_t sum = 0;
-    const uint8_t *data = (const uint8_t *)rps;
-
-    for (size_t i = 0; i < sizeof(*rps); i++) sum += data[i];
-    for (size_t i = 0; i < payload_len; i++) sum += payload[i];
-
-    while (sum >> 16) sum = (sum & 0xFFFFu) + (sum >> 16);
+    size_t total_len = sizeof(rps_header) + payload_len;
+    
+    // Allocate temporary buffer aligned to 16-bit boundary
+    size_t alloc_len = total_len + (total_len % 2);
+    uint8_t *temp_buf = malloc(alloc_len);
+    if (!temp_buf) return 0;
+    
+    memcpy(temp_buf, rps, sizeof(rps_header));
+    // Ensure the checksum field in the temporary buffer is 0 during calculation
+    rps_header *temp_hdr = (rps_header *)temp_buf;
+    temp_hdr->checksum = 0;
+    
+    if (payload_len > 0 && payload) {
+        memcpy(temp_buf + sizeof(rps_header), payload, payload_len);
+    }
+    
+    // Pad the last byte if length is odd
+    if (total_len % 2 != 0) {
+        temp_buf[total_len] = 0;
+    }
+    
+    const uint16_t *ptr = (const uint16_t *)temp_buf;
+    for (size_t i = 0; i < alloc_len / 2; i++) {
+        sum += ptr[i];
+    }
+    
+    free(temp_buf);
+    
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
     return (uint16_t)(~sum);
 }
-
 
 uint16_t calculate_checksum_ip(const ip_header *ip) {
     ip_header temp = *ip;
@@ -79,4 +103,5 @@ uint16_t calculate_checksum_ip(const ip_header *ip) {
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)(~sum);
 }
+
 
